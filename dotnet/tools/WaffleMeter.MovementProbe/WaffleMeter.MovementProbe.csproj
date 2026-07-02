@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Movement-replay feasibility spike / diagnostic (dev tool). Replays a packet-debug corpus through the
+    real aligner+assembler+StreamProcessor and mirrors framing/decompression to extract the 0x37xx
+    movement family, cross-referencing movement entity-ids against damage actor-ids. Public deps come from
+    the sibling waffle_meter checkout. Run via dotnet run (Release) with the corpus path.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WaffleMeter.MovementProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Capture\WaffleMeter.Capture.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Data\WaffleMeter.Data.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
+  </ItemGroup>
+
+</Project>

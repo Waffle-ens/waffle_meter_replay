@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    End-to-end replay generator (dev tool). Replays a packet-debug corpus through the real
+    aligner+assembler+StreamProcessor with a parallel MovementParser tap feeding a MovementRecorder, and
+    writes a ReplayRecording JSON per battle. Proves the engine against recorded data. Public deps come
+    from the sibling waffle_meter checkout. Run via dotnet run (Release) with the corpus path.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WaffleMeter.ReplayGenCli</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WaffleMeter.Replay\WaffleMeter.Replay.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Capture\WaffleMeter.Capture.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Data\WaffleMeter.Data.csproj" />
+  </ItemGroup>
+
+</Project>

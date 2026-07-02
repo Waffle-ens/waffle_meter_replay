@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests for the private replay engine (0x371D decode + reconstruction + runtime loader). These encode
+       the reverse-engineered wire format in their fixtures, so they live in the private repo with the
+       engine. Public serializer/model tests stay in waffle_meter. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WaffleMeter.Replay\WaffleMeter.Replay.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Capture\WaffleMeter.Capture.csproj" />
+  </ItemGroup>
+
+</Project>

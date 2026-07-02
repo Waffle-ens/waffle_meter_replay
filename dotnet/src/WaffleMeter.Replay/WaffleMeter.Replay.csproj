@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Movement/positional REPLAY ENGINE (WCL-style) — the private, reverse-engineered core (0x37xx decode,
+    incl. the 0x371D delta stream, + keyframe-anchored reconstruction). Implements IReplayEngine from the
+    PUBLIC WaffleMeter.Replay.Abstractions and is discovered at runtime by ReplayEngineLoader, so the app
+    (in the public waffle_meter repo) has NO compile-time reference to it and this source stays private.
+
+    Build dependency: the public assemblies (Abstractions/Capture/Data) come from the waffle_meter repo
+    checked out as a SIBLING directory (../../../../waffle_meter). Clone both side by side:
+        projects/waffle_meter          (public)
+        projects/waffle_meter_replay   (this)
+    Namespace stays WaffleMeter.Replay (same as Abstractions) so consumers are unchanged.
+  -->
+  <PropertyGroup>
+    <RootNamespace>WaffleMeter.Replay</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Replay.Abstractions\WaffleMeter.Replay.Abstractions.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Capture\WaffleMeter.Capture.csproj" />
+    <ProjectReference Include="..\..\..\..\waffle_meter\dotnet\src\WaffleMeter.Data\WaffleMeter.Data.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same LZ4 BLOCK codec StreamProcessor uses, to decode FF FF bundles that carry inner 0x37xx. -->
+    <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
+  </ItemGroup>
+
+</Project>
