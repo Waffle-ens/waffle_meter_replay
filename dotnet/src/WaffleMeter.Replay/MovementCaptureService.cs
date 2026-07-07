@@ -104,9 +104,11 @@ public sealed class MovementCaptureService : IReplayEngine
                 report.PartySlots.GetValueOrDefault(u.Id)));
         }
 
-        // Supports who moved but dealt no damage: add if they resolve to a named user. Scoped to the party
-        // roster when one is given (so non-party movers on a shared boss are not added).
-        if (_extraIdentity is { } src)
+        // Party/raid supports who moved but dealt no damage: added ONLY when a party roster is known and they
+        // are in it. Without a roster (e.g. an open-field boss), we do NOT add nearby named movers — otherwise
+        // every random player in view of the fight would appear. Damage contributors (above) already cover
+        // everyone who actually fought the boss.
+        if (_extraIdentity is { } src && party != null)
         {
             foreach (int uid in _buffer.Keys)
             {
@@ -116,8 +118,7 @@ public sealed class MovementCaptureService : IReplayEngine
                 }
 
                 ReplayIdentity id = src.Resolve(uid);
-                if (id.Found && !string.IsNullOrEmpty(id.Nickname)
-                    && (party == null || party.Contains((id.Nickname!, id.Server))))
+                if (id.Found && !string.IsNullOrEmpty(id.Nickname) && party.Contains((id.Nickname!, id.Server)))
                 {
                     included.Add(uid);
                     tracks.Add(ReplayTrackBuilder.BuildTrack(uid, Samples(uid), start, end, id, isTarget: false, 0));
