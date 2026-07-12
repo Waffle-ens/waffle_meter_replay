@@ -68,9 +68,11 @@ public sealed class MovementCaptureService : IReplayEngine
 
     /// <summary>Build and store the recording for a just-logged battle. Wire to
     /// <c>DpsCalculator.OnBattleLogged</c>.</summary>
-    /// <param name="partyMembers">When non-null and non-empty, only these (nickname, server) identities —
-    /// the party/raid roster — plus self and the boss are included; all other combat contributors (e.g.
-    /// random players on a shared field boss) are dropped. Null = include every contributor (CLI/tests).</param>
+    /// <param name="partyMembers">Non-null: only these (nickname, server) identities — the party/raid
+    /// roster — plus self and the boss are included; all other combat contributors (e.g. random players on
+    /// a shared field boss) are dropped. An EMPTY roster means "not in a party (or roster unknown)" and
+    /// keeps self + boss only — never every nearby random. Null = include every contributor (CLI/tests
+    /// escape hatch; the live app always passes its roster, possibly empty).</param>
     public ReplayRecording OnBattleLogged(DpsLog log, IReadOnlyCollection<(string Nickname, int Server)>? partyMembers = null)
     {
         DpsReport report = log.Report;
@@ -78,9 +80,9 @@ public sealed class MovementCaptureService : IReplayEngine
         long end = report.BattleEnd >= start ? report.BattleEnd : start;
         int? targetUid = report.Target?.Id;
 
-        HashSet<(string, int)>? party = partyMembers is { Count: > 0 }
-            ? new HashSet<(string, int)>(partyMembers)
-            : null;
+        HashSet<(string, int)>? party = partyMembers is null
+            ? null
+            : new HashSet<(string, int)>(partyMembers);
 
         var tracks = new List<ReplayTrack>();
         var included = new HashSet<int>();

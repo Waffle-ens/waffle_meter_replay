@@ -163,6 +163,33 @@ public class MovementCaptureServiceTests
     }
 
     [Fact]
+    public void Empty_roster_keeps_only_self_and_boss()
+    {
+        // Not in a party (or the 0x9702 roster was never seen): a solo player at a shared field boss.
+        // The recording must show self + the boss ONLY — never the random contributors around them.
+        var svc = new MovementCaptureService();
+        svc.Scan(PositionPacket(0x371C, 100, 1000f, 2000f, 50f), at: 1000); // self
+        svc.Scan(PositionPacket(0x371C, 300, -500f, 600f, 70f), at: 1100);  // random player
+        svc.Scan(PositionPacket(0x371C, 999, 1200f, 1900f, 55f), at: 1200); // boss
+
+        var report = new DpsReport
+        {
+            BattleStart = 900,
+            BattleEnd = 1500,
+            ExecutorId = 100,
+            Contributors = [Contributor(100, "나", exec: true), Contributor(300, "막공인")],
+            Target = new MobInfo(999, new Mob(2600089, "필드보스", true), remainHp: 0, maxHp: 1000),
+        };
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog { Report = report }, Array.Empty<(string, int)>());
+
+        Assert.Contains(rec.Tracks, t => t.Uid == 100 && t.IsSelf);
+        Assert.Contains(rec.Tracks, t => t.Uid == 999 && t.IsTarget);
+        Assert.DoesNotContain(rec.Tracks, t => t.Uid == 300);
+        Assert.Equal(2, rec.Tracks.Count);
+    }
+
+    [Fact]
     public void Lookup_by_battle_start_and_reset()
     {
         var svc = new MovementCaptureService();
