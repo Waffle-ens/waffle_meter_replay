@@ -59,11 +59,22 @@ public sealed class MovementCaptureService : IReplayEngine
     /// <param name="persistDir">If set, each built recording is also written to
     /// <c>{persistDir}/replay-{startMs}.json</c> (survives restart; lets history be replayed and lets a
     /// recording be inspected offline). Null = in-memory only.</param>
+    /// <param name="retentionMs">How much movement HISTORY is kept in the rolling buffer. The recorder does
+    /// not know a fight has started until it is logged, so it keeps the recent past and slices
+    /// [battleStart, battleEnd] out of it afterwards. This is therefore the longest battle that can be
+    /// replayed in full: a fight that ran longer would have had its earliest minutes trimmed away before it
+    /// ended (the replay would simply start late — nothing breaks). 35 min is far past any boss, which run
+    /// 5-15 min, and it also bounds memory: samples, not entities, are what the buffer costs.</param>
+    /// <param name="maxEntities">Ceiling on tracked entities. Measured live: a 2.6 h dungeon session sees
+    /// 6,147 movement-broadcasting entities, up to 2,763 of them inside one retention window — every trash
+    /// mob broadcasts. The cap only bounds the per-entity bookkeeping (~100 bytes each), NOT the samples, so
+    /// it is set well clear of that peak; a full buffer evicts by age rather than turning newcomers away
+    /// (see <see cref="EvictOldestEntities"/>).</param>
     public MovementCaptureService(
         IReplayIdentitySource? extraIdentity = null,
         string? persistDir = null,
         long retentionMs = 35 * 60 * 1000L,
-        int maxEntities = 4096,
+        int maxEntities = 16_384,
         int maxSamplesPerEntity = 20_000,
         int maxRecordings = 20,
         int maxCasts = 20_000)
