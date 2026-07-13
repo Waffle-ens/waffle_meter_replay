@@ -328,6 +328,42 @@ public class MovementCaptureServiceTests
     }
 
     [Fact]
+    public void Casts_give_self_and_the_boss_a_path_the_movement_broadcast_never_carries()
+    {
+        // 0x371D/0x371C never carry SELF (the server doesn't echo your own position back) and only trickle
+        // for the boss. But every cast states where its anchor entity stood — self's own casts, and every
+        // player casting AT the boss. That is the only path these two get.
+        var svc = new MovementCaptureService();
+
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 1000f, 2000f, 50f), at: 1_100); // self casts on self
+        svc.Scan(CastPacket(100, 17400060, 999, 0f, 5000f, 6000f, 50f), at: 1_200); // self casts AT the boss
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 1100f, 2100f, 50f), at: 1_300);
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5050f, 6050f, 50f), at: 1_400);   // the boss casts
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 1_500,
+                ExecutorId = 100,
+                Contributors = [Contributor(100, "나", exec: true)],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+            },
+        });
+
+        ReplayTrack self = Assert.Single(rec.Tracks, t => t.IsSelf);
+        Assert.Equal(2, self.Points.Count); // from its own two self-casts
+        Assert.Equal(1000f, self.Points[0].X);
+        Assert.Equal(1100f, self.Points[1].X);
+
+        ReplayTrack boss = Assert.Single(rec.Tracks, t => t.IsTarget);
+        Assert.Equal(2, boss.Points.Count); // the player's cast AT it, then its own cast
+        Assert.Equal(5000f, boss.Points[0].X);
+        Assert.Equal(5050f, boss.Points[1].X);
+    }
+
+    [Fact]
     public void Lookup_by_battle_start_and_reset()
     {
         var svc = new MovementCaptureService();

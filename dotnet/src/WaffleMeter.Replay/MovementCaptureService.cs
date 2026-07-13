@@ -276,7 +276,23 @@ public sealed class MovementCaptureService : IReplayEngine
         }
 
         _casts.Add((c, _lastHp.TryGetValue(c.ActorId, out (long Hp, long AtMs) hp) ? hp.Hp : -1));
+
+        // A cast packet also states WHERE its anchor entities were standing — the caster on a self-cast,
+        // the marked player on a targeted one (RE-verified: within ~1 unit of the boss's own keyframes,
+        // within 0-290 units of a marked player's tracked position). That makes casts a position source
+        // for the two entities the 0x371D broadcast leaves sparse:
+        //   - SELF, which the server never echoes back (you know where you are), and
+        //   - the BOSS, which only gets occasional keyframes,
+        // both of which cast constantly. Feed them in as ordinary absolute keyframes.
+        foreach (CastTarget t in c.Targets)
+        {
+            OnSample(new MovementSample(t.EntityId, c.AtMs, t.X, t.Y, t.Z, CastOpcode, 0));
+        }
     }
+
+    /// <summary>The opcode cast-derived position keyframes are tagged with, so the track builder can trust
+    /// them alongside an entity's dominant transform layout instead of competing with it.</summary>
+    internal const int CastOpcode = 0x3802;
 
     // Remaining-HP broadcast for an entity. Only the latest per entity is kept (this is the "what HP was
     // the boss at" stamp, not a timeline).
