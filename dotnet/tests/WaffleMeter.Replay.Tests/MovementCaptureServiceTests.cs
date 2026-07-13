@@ -408,6 +408,38 @@ public class MovementCaptureServiceTests
         });
 
     [Fact]
+    public void A_full_entity_buffer_evicts_the_stalest_rather_than_locking_out_the_newcomer()
+    {
+        // Live bug: every trash mob broadcasts movement, so after a couple of hours the buffer was full of
+        // long-dead entities and the CURRENT fight's boss and player couldn't get in — their recordings came
+        // out with no positions at all (boss=none, self=MISSING, totalPts=0).
+        var svc = new MovementCaptureService(maxEntities: 8);
+
+        for (int mob = 500; mob < 520; mob++)
+        {
+            svc.Scan(PositionPacket(0x371C, mob, 1f + mob, 2f + mob, 3f), at: 100 + mob); // trash, long gone
+        }
+
+        svc.Scan(PositionPacket(0x371C, 100, 1000f, 2000f, 50f), at: 1_100); // the fight's participants,
+        svc.Scan(PositionPacket(0x371C, 999, 5000f, 6000f, 50f), at: 1_200); // arriving LAST
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 1_500,
+                ExecutorId = 100,
+                Contributors = [Contributor(100, "나", exec: true)],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+            },
+        });
+
+        Assert.Equal(1000f, Assert.Single(Assert.Single(rec.Tracks, t => t.IsSelf).Points).X);
+        Assert.Equal(5000f, Assert.Single(Assert.Single(rec.Tracks, t => t.IsTarget).Points).X);
+    }
+
+    [Fact]
     public void Lookup_by_battle_start_and_reset()
     {
         var svc = new MovementCaptureService();

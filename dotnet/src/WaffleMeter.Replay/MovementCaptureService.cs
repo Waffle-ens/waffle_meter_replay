@@ -63,7 +63,7 @@ public sealed class MovementCaptureService : IReplayEngine
         IReplayIdentitySource? extraIdentity = null,
         string? persistDir = null,
         long retentionMs = 35 * 60 * 1000L,
-        int maxEntities = 512,
+        int maxEntities = 4096,
         int maxSamplesPerEntity = 20_000,
         int maxRecordings = 20,
         int maxCasts = 20_000)
@@ -348,9 +348,14 @@ public sealed class MovementCaptureService : IReplayEngine
 
         if (!_buffer.TryGetValue(s.EntityId, out List<MovementSample>? list))
         {
+            // At capacity, make room by AGE — never by refusing the newcomer. A dungeon session walks past
+            // thousands of entities (every trash mob broadcasts movement), so a "first N entities win" cap
+            // quietly locks out whatever shows up later: measured live, after a couple of hours the boss and
+            // the local player couldn't get into the buffer at all and their recordings came out empty
+            // (boss=none, self=MISSING, totalPts=0).
             if (_buffer.Count >= _maxEntities)
             {
-                return;
+                EvictOldestEntities();
             }
 
             list = new List<MovementSample>();
@@ -368,6 +373,29 @@ public sealed class MovementCaptureService : IReplayEngine
         {
             _sinceTrim = 0;
             TrimOld();
+        }
+    }
+
+    // Free space in the entity buffer: first the ones whose samples have aged out entirely, and if that
+    // frees nothing (a busy zone full of live entities), the least recently seen quarter. Whoever is
+    // actually in the current fight has just been sampled, so they are never the ones evicted.
+    private void EvictOldestEntities()
+    {
+        TrimOld();
+        if (_buffer.Count < _maxEntities)
+        {
+            return;
+        }
+
+        List<int> stale = _buffer
+            .OrderBy(kv => kv.Value.Count > 0 ? kv.Value[^1].AtMs : 0)
+            .Take(Math.Max(1, _maxEntities / 4))
+            .Select(kv => kv.Key)
+            .ToList();
+
+        foreach (int uid in stale)
+        {
+            _buffer.Remove(uid);
         }
     }
 
