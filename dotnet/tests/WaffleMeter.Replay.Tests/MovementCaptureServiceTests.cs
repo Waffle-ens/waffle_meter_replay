@@ -364,6 +364,50 @@ public class MovementCaptureServiceTests
     }
 
     [Fact]
+    public void An_impossible_excursion_is_dropped_but_a_real_teleport_is_kept()
+    {
+        // Measured on a live fight: a run of self keyframes decoded to the world origin — 21k units out of
+        // the boss room and straight back — which stretched the map view across the whole world. The track
+        // must reject a trip nobody could have made AND come back from…
+        var svc = new MovementCaptureService();
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 20_000f, 10_000f, 5f), at: 1_100);
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 71f, -71f, 5f), at: 1_600);      // garbage
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 75f, -66f, 5f), at: 2_100);      // garbage (a run)
+        svc.Scan(CastPacket(100, 17400058, 100, 0f, 20_400f, 10_300f, 5f), at: 2_600);
+
+        ReplayTrack self = Assert.Single(Record(svc).Tracks, t => t.IsSelf);
+
+        Assert.Equal(2, self.Points.Count);
+        Assert.All(self.Points, p => Assert.InRange(p.X, 19_000f, 21_000f));
+
+        // …while a genuine teleport — the entity STAYS where it lands — survives untouched: nothing is
+        // dropped, and the player snaps across the jump instead of gliding.
+        var svc2 = new MovementCaptureService();
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 20_000f, 10_000f, 5f), at: 1_100);
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_000f, 60_000f, 5f), at: 1_600); // recalled away
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_200f, 60_100f, 5f), at: 2_100);
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_400f, 60_050f, 5f), at: 2_600);
+
+        ReplayTrack moved = Assert.Single(Record(svc2).Tracks, t => t.IsSelf);
+        Assert.Equal(4, moved.Points.Count);
+        Assert.Equal(90_000f, moved.Points[1].X);
+        Assert.Equal(90_400f, moved.Points[3].X);
+    }
+
+    private static ReplayRecording Record(MovementCaptureService svc)
+        => svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 3_000,
+                ExecutorId = 100,
+                Contributors = [Contributor(100, "나", exec: true)],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+            },
+        });
+
+    [Fact]
     public void Lookup_by_battle_start_and_reset()
     {
         var svc = new MovementCaptureService();

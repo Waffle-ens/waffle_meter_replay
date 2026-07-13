@@ -325,6 +325,10 @@ public sealed class MovementParser
 
         // Additional marked players (a spread). Walk the tail for [varint uid][f32 X][f32 Y][f32 Z] runs;
         // a byte that doesn't open a plausible entry is skipped, so trailing non-target fields are inert.
+        // A byte-walk over a variable tail WILL occasionally line up on garbage that decodes as a "valid"
+        // float triplet, so an entry is only taken when it lands in the same neighbourhood as the primary
+        // target: a mechanic marks people who are IN the fight, never one across the zone. Without this the
+        // stray entries poison the marked player's position track (measured: points 100k units off).
         int q = p + 16;
         while (q + 13 <= packet.Length && targets.Count < MaxCastTargets)
         {
@@ -334,7 +338,7 @@ public sealed class MovementParser
                 float ex = ReadF(packet, q + uid.Length);
                 float ey = ReadF(packet, q + uid.Length + 4);
                 float ez = ReadF(packet, q + uid.Length + 8);
-                if (uid.Value > 0 && LooksLikeCoord(ex, ey, ez))
+                if (uid.Value > 0 && LooksLikeCoord(ex, ey, ez) && NearPrimary(ex, ey, x, y))
                 {
                     // The frame repeats the primary target inside the list; one zone per player.
                     if (!ContainsTarget(targets, uid.Value))
@@ -357,6 +361,17 @@ public sealed class MovementParser
     /// <summary>Cap on a single cast's marked players — a spread marks a handful; more means we are
     /// walking garbage, not a mechanic.</summary>
     private const int MaxCastTargets = 32;
+
+    /// <summary>How far a marked player may sit from the cast's primary target (world units). Generously
+    /// past any mechanic's reach (the widest observed zone is a 7,500-unit donut), but far short of the
+    /// map-crossing values a mis-aligned byte-walk produces.</summary>
+    private const float MaxSpreadSpanWorld = 20_000f;
+
+    private static bool NearPrimary(float x, float y, float px, float py)
+    {
+        float dx = x - px, dy = y - py;
+        return dx * dx + dy * dy <= MaxSpreadSpanWorld * MaxSpreadSpanWorld;
+    }
 
     private static bool ContainsTarget(List<CastTarget> targets, int uid)
     {

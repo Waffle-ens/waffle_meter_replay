@@ -270,6 +270,11 @@ public sealed class MovementCaptureService : IReplayEngine
             _latestAt = c.AtMs;
         }
 
+        if (c.Targets.Count == 0)
+        {
+            return;
+        }
+
         if (_casts.Count >= _maxCasts)
         {
             _casts.RemoveRange(0, _casts.Count / 2); // drop the oldest half — a bounded rolling window
@@ -284,6 +289,11 @@ public sealed class MovementCaptureService : IReplayEngine
         //   - SELF, which the server never echoes back (you know where you are), and
         //   - the BOSS, which only gets occasional keyframes,
         // both of which cast constantly. Feed them in as ordinary absolute keyframes.
+        // Bad coordinates are NOT filtered here. A streaming check can't tell a packet that merely decoded
+        // like a cast from an entity that genuinely relocated — both contradict the history, and noise
+        // repeats itself often enough to corroborate a lie. The track builder decides with hindsight
+        // instead (ReplayTrackBuilder.DropSpikes): an excursion the entity comes BACK from is impossible,
+        // a jump it stays at is a teleport.
         foreach (CastTarget t in c.Targets)
         {
             OnSample(new MovementSample(t.EntityId, c.AtMs, t.X, t.Y, t.Z, CastOpcode, 0));
