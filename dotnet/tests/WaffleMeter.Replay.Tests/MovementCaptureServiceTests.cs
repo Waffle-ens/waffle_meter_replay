@@ -189,6 +189,144 @@ public class MovementCaptureServiceTests
         Assert.Equal(2, rec.Tracks.Count);
     }
 
+    // 0x3802: [len][op lo][op hi][actor v][flag][u32 skill][ctr][b][target v][f32 facing][f32 X][f32 Y][f32 Z]
+    private static byte[] CastPacket(int actorId, int skill, int targetId, float facing, float x, float y, float z)
+    {
+        var p = new List<byte> { 0x10, 0x02, 0x38 };
+        p.AddRange(Varint(actorId));
+        p.Add(0x00);
+        p.AddRange(BitConverter.GetBytes(skill));
+        p.Add(0x00);
+        p.Add(0x02);
+        p.AddRange(Varint(targetId));
+        p.AddRange(BitConverter.GetBytes(facing));
+        p.AddRange(BitConverter.GetBytes(x));
+        p.AddRange(BitConverter.GetBytes(y));
+        p.AddRange(BitConverter.GetBytes(z));
+        return p.ToArray();
+    }
+
+    // 0x8D00: [mob v][v][v][v][u32 remaining hp]
+    private static byte[] RemainHpPacket(int mobId, int hp)
+    {
+        var p = new List<byte> { 0x10, 0x00, 0x8D };
+        p.AddRange(Varint(mobId));
+        p.AddRange([(byte)0x01, (byte)0x02, (byte)0x03]);
+        p.AddRange(BitConverter.GetBytes(hp));
+        return p.ToArray();
+    }
+
+    [Fact]
+    public void Records_the_bosses_mechanics_with_the_hp_they_fired_at()
+    {
+        var svc = new MovementCaptureService();
+
+        svc.Scan(RemainHpPacket(999, 800), at: 1_000);                                   // boss at 80 %
+        svc.Scan(CastPacket(999, 1806450, 999, -117.5f, 5000f, 6000f, 50f), at: 1_100);  // a line, self-anchored
+        svc.Scan(RemainHpPacket(999, 300), at: 2_000);                                   // boss down to 30 %
+        svc.Scan(CastPacket(999, 1807111, 100, 12f, 1000f, 2000f, 50f), at: 2_100);      // a marker on the player
+        svc.Scan(CastPacket(100, 17400058, 999, 0f, 1000f, 2000f, 50f), at: 2_200);      // a PLAYER's skill
+
+        var report = new DpsReport
+        {
+            BattleStart = 900,
+            BattleEnd = 3_000,
+            ExecutorId = 100,
+            Contributors = [Contributor(100, "나", exec: true)],
+            Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+        };
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog { Report = report }, new[] { ("나", 2003) });
+
+        Assert.Equal(2, rec.Casts.Count); // the player's own skill is not a mechanic
+
+        ReplayCast line = rec.Casts[0];
+        Assert.Equal(200, line.TMs); // 1100 - 900, relative to the battle start
+        Assert.Equal(1806450, line.SkillCode);
+        Assert.Equal(-117.5f, line.FacingDeg); // rotates the line on the map
+        Assert.Equal(0.8f, line.HpFraction, 3); // the HP it fired at — NOT the battle's end state
+        Assert.Equal(999, Assert.Single(line.Targets).Uid); // anchored on the boss itself
+
+        ReplayCast mark = rec.Casts[1];
+        Assert.Equal(1807111, mark.SkillCode);
+        Assert.Equal(0.3f, mark.HpFraction, 3);
+        CastTargetIsPlayer(mark, uid: 100, x: 1000f, y: 2000f);
+    }
+
+    private static void CastTargetIsPlayer(ReplayCast cast, int uid, float x, float y)
+    {
+        ReplayCastTarget t = Assert.Single(cast.Targets);
+        Assert.Equal(uid, t.Uid);
+        Assert.Equal(x, t.X);
+        Assert.Equal(y, t.Y);
+    }
+
+    [Fact]
+    public void Mechanics_outside_the_battle_window_are_dropped_and_a_reset_clears_them()
+    {
+        var svc = new MovementCaptureService();
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5000f, 6000f, 50f), at: 100);   // long before the pull
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5000f, 6000f, 50f), at: 1_200); // inside
+
+        var report = new DpsReport
+        {
+            BattleStart = 1_000,
+            BattleEnd = 1_500,
+            Contributors = [Contributor(100, "나", exec: true)],
+            Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 5, maxHp: 1000),
+        };
+
+        Assert.Single(svc.OnBattleLogged(new DpsLog { Report = report }).Casts);
+
+        svc.Reset();
+        Assert.Empty(svc.OnBattleLogged(new DpsLog { Report = report }).Casts);
+    }
+
+    [Fact]
+    public void Hp_is_unknown_rather_than_wrong_when_the_boss_never_broadcast_it()
+    {
+        var svc = new MovementCaptureService();
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5000f, 6000f, 50f), at: 1_200);
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 1_500,
+                Contributors = [Contributor(100, "나", exec: true)],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+            },
+        });
+
+        Assert.Equal(-1f, Assert.Single(rec.Casts).HpFraction); // -1 = unknown, never a fabricated 0 %
+    }
+
+    [Fact]
+    public void Hp_falls_back_to_the_peak_the_boss_broadcast_when_the_report_lacks_a_max()
+    {
+        // A fight the capture joined without ever learning the boss's max HP (report MaxHp = 0). The
+        // fractions must still be meaningful — measured against the highest HP the boss broadcast.
+        var svc = new MovementCaptureService();
+        svc.Scan(RemainHpPacket(999, 900), at: 1_100);
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5000f, 6000f, 50f), at: 1_150);
+        svc.Scan(RemainHpPacket(999, 450), at: 1_300);
+        svc.Scan(CastPacket(999, 1806450, 999, 0f, 5000f, 6000f, 50f), at: 1_350);
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 1_500,
+                Contributors = [Contributor(100, "나", exec: true)],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 450, maxHp: 0),
+            },
+        });
+
+        Assert.Equal(1f, rec.Casts[0].HpFraction);   // the peak seen in the fight
+        Assert.Equal(0.5f, rec.Casts[1].HpFraction); // half of it
+    }
+
     [Fact]
     public void Lookup_by_battle_start_and_reset()
     {

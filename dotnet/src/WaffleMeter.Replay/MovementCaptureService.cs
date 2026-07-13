@@ -34,6 +34,19 @@ public sealed class MovementCaptureService : IReplayEngine
     private readonly int _maxSamplesPerEntity;
     private readonly int _maxRecordings;
 
+    // Boss mechanics: a rolling list of casts (a fight is 100-300, so one flat list is plenty). Each cast
+    // is stamped, AT CAPTURE TIME, with the caster's last-broadcast remaining HP — the saved report only
+    // knows the battle's END state, which would label every cast identically.
+    private readonly List<(CastSample Cast, long RemainHp)> _casts = new();
+    private readonly Dictionary<int, (long Hp, long AtMs)> _lastHp = new();
+    private readonly int _maxCasts;
+
+    /// <summary>Cap on the HP table. Everything that takes damage broadcasts HP — a long dungeon session
+    /// sees thousands of entities (5,584 in a measured 2 h corpus) — so this is pruned by age, NOT by
+    /// refusing new ids: a hard "first N entities win" cap would lock the boss OUT of the table on any
+    /// pull that started after enough trash, and its mechanics would lose their HP stamp.</summary>
+    private const int MaxHpEntities = 4096;
+
     private long _latestAt;
     private long _sinceTrim;
 
@@ -52,7 +65,8 @@ public sealed class MovementCaptureService : IReplayEngine
         long retentionMs = 35 * 60 * 1000L,
         int maxEntities = 512,
         int maxSamplesPerEntity = 20_000,
-        int maxRecordings = 20)
+        int maxRecordings = 20,
+        int maxCasts = 20_000)
     {
         _extraIdentity = extraIdentity;
         _persistDir = persistDir;
@@ -60,7 +74,8 @@ public sealed class MovementCaptureService : IReplayEngine
         _maxEntities = maxEntities;
         _maxSamplesPerEntity = maxSamplesPerEntity;
         _maxRecordings = maxRecordings;
-        _parser = new MovementParser(OnSample);
+        _maxCasts = maxCasts;
+        _parser = new MovementParser(OnSample, OnCast, OnHp);
     }
 
     /// <summary>Tap point: feed one assembled application packet (same bytes the DPS parser receives).</summary>
@@ -143,6 +158,7 @@ public sealed class MovementCaptureService : IReplayEngine
             TargetCode = report.Target?.Mob.Code,
             TargetName = report.Target?.Mob.Name,
             Tracks = tracks,
+            Casts = BuildCasts(targetUid, start, end, report.Target?.MaxHp ?? 0),
         };
 
         LastRecording = rec;
@@ -154,6 +170,57 @@ public sealed class MovementCaptureService : IReplayEngine
 
         Persist(rec);
         return rec;
+    }
+
+    /// <summary>The BOSS's mechanic casts inside the battle window, in time order. Only the target's own
+    /// casts are kept — a player's abilities are not mechanics and would swamp the recording. Each cast
+    /// carries the boss's HP fraction at that moment (from the 0x8D00 broadcast, so "the pattern he does at
+    /// 70 %" groups); the fraction is -1 when the battle never reported a max HP.</summary>
+    private List<ReplayCast> BuildCasts(int? targetUid, long start, long end, long maxHp)
+    {
+        var casts = new List<ReplayCast>();
+        if (targetUid is not { } boss)
+        {
+            return casts;
+        }
+
+        // The report only knows a boss's max HP once the meter has seen it; on a fight the capture joined
+        // late it can be 0. Fall back to the highest HP the boss broadcast during the window, so the HP
+        // fractions stay meaningful (relative to the fight's own peak) instead of collapsing to "unknown".
+        if (maxHp <= 0)
+        {
+            foreach ((CastSample c, long remainHp) in _casts)
+            {
+                if (c.ActorId == boss && c.AtMs >= start && c.AtMs <= end && remainHp > maxHp)
+                {
+                    maxHp = remainHp;
+                }
+            }
+        }
+
+        foreach ((CastSample c, long remainHp) in _casts)
+        {
+            if (c.ActorId != boss || c.AtMs < start || c.AtMs > end)
+            {
+                continue;
+            }
+
+            float hp = maxHp > 0 && remainHp >= 0
+                ? Math.Clamp((float)((double)remainHp / maxHp), 0f, 1f)
+                : -1f;
+
+            casts.Add(new ReplayCast
+            {
+                TMs = (int)(c.AtMs - start),
+                SkillCode = c.SkillCode,
+                FacingDeg = c.FacingDeg,
+                HpFraction = hp,
+                Targets = c.Targets.Select(t => new ReplayCastTarget(t.EntityId, t.X, t.Y, t.Z)).ToList(),
+            });
+        }
+
+        casts.Sort((a, b) => a.TMs.CompareTo(b.TMs));
+        return casts;
     }
 
     // Best-effort: write the recording to {persistDir}/replay-{startMs}.json (survives restart + offline-inspectable).
@@ -179,10 +246,12 @@ public sealed class MovementCaptureService : IReplayEngine
     public bool TryGetForBattle(long battleStartMs, out ReplayRecording? recording)
         => _byBattleStart.TryGetValue(battleStartMs, out recording);
 
-    /// <summary>Clear all buffered movement + stored recordings (wire to the meter reset / flush).</summary>
+    /// <summary>Clear all buffered movement + casts + stored recordings (wire to the meter reset / flush).</summary>
     public void Reset()
     {
         _buffer.Clear();
+        _casts.Clear();
+        _lastHp.Clear();
         _byBattleStart.Clear();
         LastRecording = null;
         _latestAt = 0;
@@ -191,6 +260,58 @@ public sealed class MovementCaptureService : IReplayEngine
 
     private IEnumerable<MovementSample> Samples(int uid)
         => _buffer.TryGetValue(uid, out List<MovementSample>? list) ? list : Enumerable.Empty<MovementSample>();
+
+    // A skill cast. Kept regardless of caster (the battle's boss isn't known until it is logged); the
+    // recorder filters to the target's own casts when it builds the recording.
+    private void OnCast(CastSample c)
+    {
+        if (c.AtMs > _latestAt)
+        {
+            _latestAt = c.AtMs;
+        }
+
+        if (_casts.Count >= _maxCasts)
+        {
+            _casts.RemoveRange(0, _casts.Count / 2); // drop the oldest half — a bounded rolling window
+        }
+
+        _casts.Add((c, _lastHp.TryGetValue(c.ActorId, out (long Hp, long AtMs) hp) ? hp.Hp : -1));
+    }
+
+    // Remaining-HP broadcast for an entity. Only the latest per entity is kept (this is the "what HP was
+    // the boss at" stamp, not a timeline).
+    private void OnHp(int entityId, long atMs, long hp)
+    {
+        if (atMs > _latestAt)
+        {
+            _latestAt = atMs;
+        }
+
+        if (_lastHp.Count >= MaxHpEntities && !_lastHp.ContainsKey(entityId))
+        {
+            PruneHp();
+        }
+
+        _lastHp[entityId] = (hp, atMs);
+    }
+
+    // Drop entities whose HP hasn't been broadcast inside the retention window (dead trash, a previous
+    // instance). If that frees nothing — a burst of live entities — halve the table by age so a new boss
+    // can always get in.
+    private void PruneHp()
+    {
+        long cutoff = _latestAt - _retentionMs;
+        List<int> stale = _lastHp.Where(kv => kv.Value.AtMs < cutoff).Select(kv => kv.Key).ToList();
+        if (stale.Count == 0)
+        {
+            stale = _lastHp.OrderBy(kv => kv.Value.AtMs).Take(_lastHp.Count / 2).Select(kv => kv.Key).ToList();
+        }
+
+        foreach (int id in stale)
+        {
+            _lastHp.Remove(id);
+        }
+    }
 
     private void OnSample(MovementSample s)
     {
@@ -228,6 +349,18 @@ public sealed class MovementCaptureService : IReplayEngine
     private void TrimOld()
     {
         long cutoff = _latestAt - _retentionMs;
+
+        int keepCast = 0;
+        for (int i = 0; i < _casts.Count; i++)
+        {
+            if (_casts[i].Cast.AtMs >= cutoff)
+            {
+                _casts[keepCast++] = _casts[i];
+            }
+        }
+
+        _casts.RemoveRange(keepCast, _casts.Count - keepCast);
+
         var empties = new List<int>();
         foreach ((int uid, List<MovementSample> list) in _buffer)
         {

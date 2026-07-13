@@ -34,7 +34,17 @@ public sealed class MovementParser
     /// the trailing u16 pair is not needed for reconstruction.</summary>
     private const int DeltaOpcode = 0x371D;
 
+    /// <summary>Skill cast (a boss mechanic). See <see cref="CastSample"/> for the decoded layout.</summary>
+    private const int CastOpcode = 0x3802;
+
+    /// <summary>Boss remaining-HP broadcast — stamps each cast with the HP the boss was at, so HP-gated
+    /// patterns group in the replay. Same packet the DPS parser reads; decoded here independently (the
+    /// engine is a parallel tap and must not reach into the meter's state).</summary>
+    private const int RemainHpOpcode = 0x8D00;
+
     private readonly Action<MovementSample> _onSample;
+    private readonly Action<CastSample>? _onCast;
+    private readonly Action<int, long, long>? _onHp;
     private readonly int _maxOffsetScan;
 
     /// <summary>Total 0x37xx packets seen (position-bearing or not).</summary>
@@ -49,11 +59,22 @@ public sealed class MovementParser
     /// <summary>FF-FF LZ4 bundles expanded.</summary>
     public long Bundles { get; private set; }
 
+    /// <summary>0x3802 casts decoded (boss mechanics).</summary>
+    public long CastSamples { get; private set; }
+
     /// <param name="onSample">Sink for each decoded position sample.</param>
+    /// <param name="onCast">Optional sink for each decoded skill cast (boss mechanics).</param>
+    /// <param name="onHp">Optional sink for a remaining-HP broadcast: (entityId, atMs, hp).</param>
     /// <param name="maxOffsetScan">How many byte offsets after the id var-int to probe for the triplet.</param>
-    public MovementParser(Action<MovementSample> onSample, int maxOffsetScan = 8)
+    public MovementParser(
+        Action<MovementSample> onSample,
+        Action<CastSample>? onCast = null,
+        Action<int, long, long>? onHp = null,
+        int maxOffsetScan = 8)
     {
         _onSample = onSample;
+        _onCast = onCast;
+        _onHp = onHp;
         _maxOffsetScan = maxOffsetScan;
     }
 
@@ -106,6 +127,27 @@ public sealed class MovementParser
         }
 
         int opcodeKey = (packet[opcodeOffset] & 0xFF) | ((packet[opcodeOffset + 1] & 0xFF) << 8);
+
+        if (opcodeKey == CastOpcode)
+        {
+            if (_onCast != null)
+            {
+                DecodeCast(packet, opcodeOffset + 2, arrivedAt);
+            }
+
+            return;
+        }
+
+        if (opcodeKey == RemainHpOpcode)
+        {
+            if (_onHp != null)
+            {
+                DecodeRemainHp(packet, opcodeOffset + 2, arrivedAt);
+            }
+
+            return;
+        }
+
         if ((opcodeKey & 0xFF00) != 0x3700)
         {
             return;
@@ -234,6 +276,129 @@ public sealed class MovementParser
 
         DeltaSamples++;
         _onSample(new MovementSample(idInfo.Value, arrivedAt, dx, dy, dz, DeltaOpcode, 0, MovementKind.Delta));
+    }
+
+    // Decode a 0x3802 cast: [actor v][flag][u32 skill][u8 ctr][u8][varint targetId][f32 facingDeg][f32 X]
+    // [f32 Y][f32 Z] … and, on a long (multi-target) frame, a trailing run of [varint uid][f32 X][f32 Y]
+    // [f32 Z] per additional marked player. Every field is bounds- and plausibility-checked, so a
+    // misframed packet yields nothing rather than a bogus mechanic.
+    private void DecodeCast(byte[] packet, int bodyStart, long arrivedAt)
+    {
+        VarIntOutput actor = PacketPrimitives.ReadVarInt(packet, bodyStart);
+        if (actor.Length < 0)
+        {
+            return;
+        }
+
+        int o = bodyStart + actor.Length;
+        if (o + 7 > packet.Length)
+        {
+            return;
+        }
+
+        int skill = PacketPrimitives.ParseUInt32Le(packet, o + 1);
+        VarIntOutput target = PacketPrimitives.ReadVarInt(packet, o + 7);
+        if (target.Length < 0)
+        {
+            return;
+        }
+
+        int p = o + 7 + target.Length;
+        if (p + 16 > packet.Length)
+        {
+            return;
+        }
+
+        float facing = ReadF(packet, p);
+        if (float.IsNaN(facing) || MathF.Abs(facing) > 400f)
+        {
+            return; // the facing is degrees; anything else means we are not aligned on the real layout
+        }
+
+        float x = ReadF(packet, p + 4), y = ReadF(packet, p + 8), z = ReadF(packet, p + 12);
+        if (!LooksLikeCoord(x, y, z))
+        {
+            return;
+        }
+
+        var targets = new List<CastTarget>(1) { new(target.Value, x, y, z) };
+
+        // Additional marked players (a spread). Walk the tail for [varint uid][f32 X][f32 Y][f32 Z] runs;
+        // a byte that doesn't open a plausible entry is skipped, so trailing non-target fields are inert.
+        int q = p + 16;
+        while (q + 13 <= packet.Length && targets.Count < MaxCastTargets)
+        {
+            VarIntOutput uid = PacketPrimitives.ReadVarInt(packet, q);
+            if (uid.Length > 0 && q + uid.Length + 12 <= packet.Length)
+            {
+                float ex = ReadF(packet, q + uid.Length);
+                float ey = ReadF(packet, q + uid.Length + 4);
+                float ez = ReadF(packet, q + uid.Length + 8);
+                if (uid.Value > 0 && LooksLikeCoord(ex, ey, ez))
+                {
+                    // The frame repeats the primary target inside the list; one zone per player.
+                    if (!ContainsTarget(targets, uid.Value))
+                    {
+                        targets.Add(new CastTarget(uid.Value, ex, ey, ez));
+                    }
+
+                    q += uid.Length + 12;
+                    continue;
+                }
+            }
+
+            q++;
+        }
+
+        CastSamples++;
+        _onCast!(new CastSample(actor.Value, arrivedAt, skill, facing, targets));
+    }
+
+    /// <summary>Cap on a single cast's marked players — a spread marks a handful; more means we are
+    /// walking garbage, not a mechanic.</summary>
+    private const int MaxCastTargets = 32;
+
+    private static bool ContainsTarget(List<CastTarget> targets, int uid)
+    {
+        foreach (CastTarget t in targets)
+        {
+            if (t.EntityId == uid)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Decode a 0x8D00 remaining-HP broadcast: [mobId v][v][v][v][u32 hp]. Mirrors the DPS parser's field
+    // walk; the boss filter (is this the battle's target?) is the recorder's job, not the parser's.
+    private void DecodeRemainHp(byte[] packet, int bodyStart, long arrivedAt)
+    {
+        VarIntOutput mob = PacketPrimitives.ReadVarInt(packet, bodyStart);
+        if (mob.Length < 0)
+        {
+            return;
+        }
+
+        int o = bodyStart + mob.Length;
+        for (int i = 0; i < 3; i++)
+        {
+            VarIntOutput skip = PacketPrimitives.ReadVarInt(packet, o);
+            if (skip.Length < 0)
+            {
+                return;
+            }
+
+            o += skip.Length;
+        }
+
+        if (o + 4 > packet.Length)
+        {
+            return;
+        }
+
+        _onHp!(mob.Value, arrivedAt, (uint)PacketPrimitives.ParseUInt32Le(packet, o));
     }
 
     private static float ReadF(byte[] b, int o) => BitConverter.ToSingle(b.AsSpan(o, 4));
