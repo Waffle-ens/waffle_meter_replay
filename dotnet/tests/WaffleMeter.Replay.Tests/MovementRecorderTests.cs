@@ -174,6 +174,36 @@ public class MovementRecorderTests
     }
 
     [Fact]
+    public void Walking_out_and_back_between_two_keyframes_stays_on_the_map()
+    {
+        // The affine pin divides by the run's NET motion. A character who walks out along an axis and comes
+        // back nets ~0 there — and the old code divided by it: measured live, a player marched 14,000 units
+        // per tick off the map in a dead-straight line. The path must stay where the character walked.
+        var rec = new MovementRecorder(new FakeIdentity());
+        rec.BeginBattle(1, 0, null, null);
+
+        rec.Observe(Sample(1, 0, 1000f, 2000f, 0f));
+        long t = 100;
+        for (int i = 0; i < 10; i++, t += 100)
+        {
+            rec.Observe(Delta(1, t, +20f, 0f)); // out …
+        }
+
+        for (int i = 0; i < 10; i++, t += 100)
+        {
+            rec.Observe(Delta(1, t, -20f, 0f)); // … and back: net X ≈ 0
+        }
+
+        rec.Observe(Sample(1, t, 1005f, 2000f, 0f)); // ends a step from where it started
+
+        ReplayTrack tr = Assert.Single(rec.EndBattle(5000, false, [new ReplayParticipant(1, 0)]).Tracks);
+
+        Assert.All(tr.Points, p => Assert.InRange(p.X, 900f, 1300f)); // it wandered ~200 units, not 100,000
+        Assert.Equal(1005f, tr.Points[^1].X, 1);                      // and still closes on the keyframe
+        Assert.True(tr.Points.Max(p => p.X) > 1100f, "the excursion itself must still be visible");
+    }
+
+    [Fact]
     public void Reconstructs_an_L_shaped_path_across_two_segments()
     {
         var rec = new MovementRecorder(new FakeIdentity());

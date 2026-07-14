@@ -381,17 +381,18 @@ public class MovementCaptureServiceTests
         Assert.All(self.Points, p => Assert.InRange(p.X, 19_000f, 21_000f));
 
         // …while a genuine teleport — the entity STAYS where it lands — survives untouched: nothing is
-        // dropped, and the player snaps across the jump instead of gliding.
+        // dropped, and the player snaps across the jump instead of gliding. (Across the room, which is what
+        // an in-fight phase/blink actually is.)
         var svc2 = new MovementCaptureService();
         svc2.Scan(CastPacket(100, 17400058, 100, 0f, 20_000f, 10_000f, 5f), at: 1_100);
-        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_000f, 60_000f, 5f), at: 1_600); // recalled away
-        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_200f, 60_100f, 5f), at: 2_100);
-        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 90_400f, 60_050f, 5f), at: 2_600);
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 25_000f, 13_000f, 5f), at: 1_600); // blinked across
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 25_200f, 13_100f, 5f), at: 2_100);
+        svc2.Scan(CastPacket(100, 17400058, 100, 0f, 25_400f, 13_050f, 5f), at: 2_600);
 
         ReplayTrack moved = Assert.Single(Record(svc2).Tracks, t => t.IsSelf);
         Assert.Equal(4, moved.Points.Count);
-        Assert.Equal(90_000f, moved.Points[1].X);
-        Assert.Equal(90_400f, moved.Points[3].X);
+        Assert.Equal(25_000f, moved.Points[1].X);
+        Assert.Equal(25_400f, moved.Points[3].X);
     }
 
     private static ReplayRecording Record(MovementCaptureService svc)
@@ -437,6 +438,35 @@ public class MovementCaptureServiceTests
 
         Assert.Equal(1000f, Assert.Single(Assert.Single(rec.Tracks, t => t.IsSelf).Points).X);
         Assert.Equal(5000f, Assert.Single(Assert.Single(rec.Tracks, t => t.IsTarget).Points).X);
+    }
+
+    [Fact]
+    public void A_track_that_is_nothing_but_noise_is_left_with_no_path()
+    {
+        // A party member whose only positional data was a few misdecoded cast frames got plotted at the
+        // world origin, 34,000 units from the fight — and the map had to zoom out to include them. The
+        // per-track filters can't see it (the noise agrees with itself); the fight's centre can.
+        var svc = new MovementCaptureService();
+        svc.Scan(PositionPacket(0x371C, 999, 20_000f, 10_000f, 5f), at: 1_100);  // the boss, in the room
+        svc.Scan(PositionPacket(0x371C, 100, 20_200f, 10_100f, 5f), at: 1_150);  // us, next to it
+        svc.Scan(PositionPacket(0x371C, 200, 71f, -71f, 5f), at: 1_200);         // a mate, "at the origin"
+        svc.Scan(PositionPacket(0x371C, 200, 75f, -66f, 5f), at: 1_300);
+
+        ReplayRecording rec = svc.OnBattleLogged(new DpsLog
+        {
+            Report = new DpsReport
+            {
+                BattleStart = 1_000,
+                BattleEnd = 1_500,
+                ExecutorId = 100,
+                Contributors = [Contributor(100, "나", exec: true), Contributor(200, "동료")],
+                Target = new MobInfo(999, new Mob(2300334, "로타르", true), remainHp: 0, maxHp: 1000),
+            },
+        });
+
+        Assert.Empty(Assert.Single(rec.Tracks, t => t.Uid == 200).Points); // no path, rather than a wrong one
+        Assert.NotEmpty(Assert.Single(rec.Tracks, t => t.IsSelf).Points);  // the real ones are untouched
+        Assert.NotEmpty(Assert.Single(rec.Tracks, t => t.IsTarget).Points);
     }
 
     [Fact]

@@ -70,13 +70,18 @@ internal static class MovementReconstructor
             }
 
             (double ex, double ey, double ez) = (cum[^1].X, cum[^1].Y, cum[^1].Z);
+
+            // The affine pin divides by the run's NET motion, so it needs the run to actually go somewhere
+            // on that axis. How far it wandered (the peak) tells us whether it did.
+            double sx = Peak(cum, c => c.X), sy = Peak(cum, c => c.Y), sz = Peak(cum, c => c.Z);
+
             foreach ((long t, double px, double py, double pz) in cum)
             {
                 double f = (double)(t - k0.AtMs) / Math.Max(1, k1.AtMs - k0.AtMs);
                 Put(t,
-                    Axis(k0.X, k1.X, px, ex, f),
-                    Axis(k0.Y, k1.Y, py, ey, f),
-                    Axis(k0.Z, k1.Z, pz, ez, f));
+                    Axis(k0.X, k1.X, px, ex, sx, f),
+                    Axis(k0.Y, k1.Y, py, ey, sy, f),
+                    Axis(k0.Z, k1.Z, pz, ez, sz, f));
             }
         }
 
@@ -92,10 +97,47 @@ internal static class MovementReconstructor
         return points;
     }
 
-    // affine: map the cumulative offset [0..cumEnd] onto the keyframe endpoints [w0..w1]; if the axis
-    // didn't net-move per the deltas, fall back to linear-in-time so it doesn't collapse to a point.
-    private static double Axis(double w0, double w1, double cum, double cumEnd, double timeFrac)
-        => Math.Abs(cumEnd) < 1e-9 ? w0 + (w1 - w0) * timeFrac : w0 + (w1 - w0) * (cum / cumEnd);
+    /// <summary>
+    /// Place one axis of one delta tick between its bracketing keyframes.
+    /// <para>
+    /// The affine pin — <c>w0 + (w1-w0)·(cum/cumEnd)</c> — is scale-free (it cancels the delta quantization
+    /// unit entirely), but it DIVIDES BY THE RUN'S NET MOTION. When a character walks out and back along an
+    /// axis, that net motion is ~0 while the intermediate offsets are not, and the ratio explodes: measured
+    /// live, a player marched 14,000 units per 100 ms tick straight off the map (a perfectly straight line,
+    /// the other axis frozen — the signature of this division).
+    /// </para>
+    /// <para>
+    /// So the pin is used only when the run actually WENT somewhere on that axis — its net motion is a
+    /// decent share of how far it wandered. Otherwise the delta shape is integrated at unit scale and the
+    /// leftover error to the closing keyframe is spread linearly over the run (a loop closure). Both land
+    /// exactly on w1; the second cannot blow up, because it never divides by the net.
+    /// </para>
+    /// </summary>
+    /// <param name="peak">The farthest the cumulative offset got from the start of the run on this axis.</param>
+    private static double Axis(double w0, double w1, double cum, double cumEnd, double peak, double timeFrac)
+    {
+        if (Math.Abs(cumEnd) >= MinNetShareOfPeak * peak && Math.Abs(cumEnd) > 1e-9)
+        {
+            return w0 + (w1 - w0) * (cum / cumEnd); // went somewhere: scale-free pin
+        }
+
+        return w0 + cum + (w1 - w0 - cumEnd) * timeFrac; // wandered and came back: integrate + close the loop
+    }
+
+    /// <summary>How much of a run's wandering must be NET motion before the scale-free pin is trusted. At
+    /// 0.5 the pin can stretch a tick by at most 2x, which bounds the artifact it used to produce.</summary>
+    private const double MinNetShareOfPeak = 0.5;
+
+    private static double Peak(List<(long T, double X, double Y, double Z)> cum, Func<(long T, double X, double Y, double Z), double> axis)
+    {
+        double peak = 0;
+        foreach ((long T, double X, double Y, double Z) c in cum)
+        {
+            peak = Math.Max(peak, Math.Abs(axis(c)));
+        }
+
+        return peak;
+    }
 
     // deltas outside the keyframe span have only a single anchor, so integrate at unit scale from that
     // keyframe (backward for the head, forward for the tail), capped in time to bound drift.

@@ -170,7 +170,7 @@ public sealed class MovementCaptureService : IReplayEngine
             BossDefeated = report.Target is { MaxHp: > 0, RemainHp: <= 0 },
             TargetCode = report.Target?.Mob.Code,
             TargetName = report.Target?.Mob.Name,
-            Tracks = tracks,
+            Tracks = DropPointsOutsideTheFight(tracks),
             Casts = BuildCasts(targetUid, start, end, report.Target?.MaxHp ?? 0),
         };
 
@@ -183,6 +183,77 @@ public sealed class MovementCaptureService : IReplayEngine
 
         Persist(rec);
         return rec;
+    }
+
+    /// <summary>How far from the fight's centre a position may sit before it is decode noise rather than a
+    /// character. Measured across a 2.6 h corpus, the farthest ANY participant ever got from the boss in a
+    /// real fight was 6,800 units (p90: 3,500) — a boss room is small. Noise, by contrast, lands 20-35k away
+    /// (usually at the world origin). This sits far above the former and well below the latter. A player who
+    /// really did leave the fight by this much has, by any useful definition, left the fight.</summary>
+    private const double MaxFightRadiusWorld = 20_000;
+
+    /// <summary>
+    /// Throw away positions that are not in this fight at all.
+    /// <para>
+    /// The per-track filters (spikes, stray clusters) can only argue with a track's OWN history, so they are
+    /// blind to a track whose every point is noise: measured live, a party member whose only positional data
+    /// came from a handful of misdecoded cast frames was plotted 34,000 units away at the world origin, and
+    /// the map view had to include them. Once every track is built, the fight's own centre is known — so
+    /// anything absurdly far from it can go, and a track left with nothing simply has no path (the same
+    /// state as a participant we never saw move).
+    /// </para>
+    /// </summary>
+    private static List<ReplayTrack> DropPointsOutsideTheFight(List<ReplayTrack> tracks)
+    {
+        // Anchor on the boss when we have it (it is the one entity that is definitionally IN the fight),
+        // else on the median of everyone's positions.
+        List<ReplayPoint> anchorPoints = tracks.FirstOrDefault(t => t.IsTarget)?.Points.ToList() ?? [];
+        if (anchorPoints.Count == 0)
+        {
+            anchorPoints = tracks.SelectMany(t => t.Points).ToList();
+        }
+
+        if (anchorPoints.Count == 0)
+        {
+            return tracks;
+        }
+
+        double cx = Median(anchorPoints.Select(p => (double)p.X));
+        double cy = Median(anchorPoints.Select(p => (double)p.Y));
+
+        var pruned = new List<ReplayTrack>(tracks.Count);
+        foreach (ReplayTrack t in tracks)
+        {
+            List<ReplayPoint> kept = t.Points
+                .Where(p => Sq(p.X - cx) + Sq(p.Y - cy) <= Sq(MaxFightRadiusWorld))
+                .ToList();
+
+            pruned.Add(kept.Count == t.Points.Count ? t : Rebuild(t, kept));
+        }
+
+        return pruned;
+    }
+
+    private static ReplayTrack Rebuild(ReplayTrack t, List<ReplayPoint> points) => new()
+    {
+        Uid = t.Uid,
+        Nickname = t.Nickname,
+        Server = t.Server,
+        Job = t.Job,
+        IsSelf = t.IsSelf,
+        IsTarget = t.IsTarget,
+        PartySlot = t.PartySlot,
+        Points = points,
+        SourceOpcode = t.SourceOpcode,
+        SourceOffset = t.SourceOffset,
+    };
+
+    private static double Sq(double v) => v * v;
+
+    private static double Median(IEnumerable<double> values)
+    {
+        double[] sorted = values.OrderBy(v => v).ToArray();
+        return sorted.Length == 0 ? 0 : sorted[sorted.Length / 2];
     }
 
     /// <summary>The BOSS's mechanic casts inside the battle window, in time order. Only the target's own
